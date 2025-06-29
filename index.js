@@ -39,7 +39,26 @@ app.post('/gemini-proxy', async (req, res) => {
     }
 
     const data = await googleResponse.json();
-    res.json(data); // Send the successful response back to your frontend
+
+    // --- THIS IS THE CRITICAL FIX ---
+    // We will now parse and validate the JSON on the server
+    if (data.candidates && data.candidates.length > 0) {
+        const textResponse = data.candidates[0].content.parts[0].text;
+        try {
+            const parsedJson = JSON.parse(textResponse);
+            // If parsing succeeds, send the clean JSON object back to the frontend
+            res.json(parsedJson);
+        } catch (jsonError) {
+            console.error("JSON Parsing Error on Server:", jsonError);
+            console.error("Malformed JSON string from AI:", textResponse);
+            // Send a specific error if the AI's response is not valid JSON
+            res.status(500).json({ error: 'The AI returned a malformed response. Please try again.' });
+        }
+    } else {
+        // Handle cases where the AI gives no response candidate
+        res.status(500).json({ error: 'The AI did not provide a valid response.' });
+    }
+    // --- END OF FIX ---
 
   } catch (error) {
     console.error('Proxy Server Error:', error);
