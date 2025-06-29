@@ -8,7 +8,7 @@ const app = express();
 
 // Use CORS to allow your deployed website to call this server
 app.use(cors({
-  origin: '*' // For testing, you can restrict this to your actual domain later
+  origin: '*' // For production, you should restrict this to your actual domain
 }));
 
 app.use(express.json({limit: '10mb'})); // Allow larger payloads for images
@@ -40,25 +40,37 @@ app.post('/gemini-proxy', async (req, res) => {
 
     const data = await googleResponse.json();
 
-    // --- THIS IS THE CRITICAL FIX ---
-    // We will now parse and validate the JSON on the server
     if (data.candidates && data.candidates.length > 0) {
-        const textResponse = data.candidates[0].content.parts[0].text;
+        let textResponse = data.candidates[0].content.parts[0].text;
+        
+        // --- THIS IS THE FINAL, ROBUST FIX ---
+        // It finds the JSON block even if it's wrapped in markdown or other text.
         try {
-            const parsedJson = JSON.parse(textResponse);
-            // If parsing succeeds, send the clean JSON object back to the frontend
-            res.json(parsedJson);
+            // Find the start and end of the JSON object
+            const startIndex = textResponse.indexOf('{');
+            const endIndex = textResponse.lastIndexOf('}');
+            
+            if (startIndex === -1 || endIndex === -1) {
+                throw new Error("Could not find a valid JSON object in the AI's response.");
+            }
+
+            // Extract only the JSON part of the string
+            const jsonString = textResponse.substring(startIndex, endIndex + 1);
+
+            const parsedJson = JSON.parse(jsonString);
+            res.json(parsedJson); // Send the clean JSON object back to the frontend
+
         } catch (jsonError) {
             console.error("JSON Parsing Error on Server:", jsonError);
-            console.error("Malformed JSON string from AI:", textResponse);
-            // Send a specific error if the AI's response is not valid JSON
+            console.error("Malformed string from AI:", textResponse);
             res.status(500).json({ error: 'The AI returned a malformed response. Please try again.' });
         }
+        // --- END OF FIX ---
+
     } else {
-        // Handle cases where the AI gives no response candidate
+        console.error("No candidates in AI response:", data);
         res.status(500).json({ error: 'The AI did not provide a valid response.' });
     }
-    // --- END OF FIX ---
 
   } catch (error) {
     console.error('Proxy Server Error:', error);
