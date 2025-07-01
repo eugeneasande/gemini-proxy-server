@@ -25,76 +25,65 @@ const extractAndParseJson = (text) => {
   }
 };
 
+// Centralized function to call the Gemini API
+async function callGoogleApi(apiKey, payload) {
+    const GOOGLE_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+    const response = await fetch(GOOGLE_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+        const errorBody = await response.text();
+        console.error("Error from Google API:", errorBody);
+        throw new Error(`Google API responded with status ${response.status}`);
+    }
+    return response.json();
+}
+
+
 app.post('/gemini-proxy', async (req, res) => {
   const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
   if (!GEMINI_API_KEY) {
     return res.status(500).json({ error: 'API key not configured on the server.' });
   }
 
-  const GOOGLE_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
-
   try {
-    // --- First Attempt ---
-    let googleResponse = await fetch(GOOGLE_API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
-    });
-
-    if (!googleResponse.ok) {
-        const errorBody = await googleResponse.text();
-        console.error("Initial Error from Google API:", errorBody);
-        throw new Error(`Google API responded with status ${googleResponse.status}`);
-    }
-    
-    let data = await googleResponse.json();
+    // --- First Attempt: Get all data ---
+    let data = await callGoogleApi(GEMINI_API_KEY, req.body);
+    let parsedJson;
 
     if (data.candidates && data.candidates.length > 0) {
-      const textResponse = data.candidates[0].content.parts[0].text;
-      try {
-        const parsedJson = extractAndParseJson(textResponse);
-        // Add a check to see if IMEI was captured
-        if (parsedJson.imei) {
-            return res.json(parsedJson); // Success on first try!
+        const textResponse = data.candidates[0].content.parts[0].text;
+        parsedJson = extractAndParseJson(textResponse);
+    } else {
+        throw new Error("AI did not provide an initial response.");
+    }
+
+    // --- Check if IMEI is missing and perform Targeted Extraction if needed ---
+    if (!parsedJson.imei) {
+        console.warn("IMEI missing. Initiating Targeted Extraction for IMEI...");
+
+        const imeiPrompt = "Analyze the attached image. Find the long numeric string next to the 'IMEI#' label. Respond with ONLY that number, nothing else.";
+        const imeiPayload = {
+            contents: [{ parts: [ { text: imeiPrompt }, req.body.contents[0].parts[1] ] }] // Re-use the image data
+        };
+
+        const imeiData = await callGoogleApi(GEMINI_API_KEY, imeiPayload);
+
+        if (imeiData.candidates && imeiData.candidates.length > 0) {
+            const imeiText = imeiData.candidates[0].content.parts[0].text;
+            // Clean up the response to get only the number
+            parsedJson.imei = imeiText.replace(/\D/g, ''); // Removes all non-digit characters
+            console.log("Successfully extracted IMEI on second attempt:", parsedJson.imei);
+        } else {
+            console.error("Targeted IMEI extraction failed to get a candidate.");
         }
-        // If IMEI is missing, we'll fall through to the retry logic
-        console.warn("IMEI not found on first attempt. Initiating Smart Retry...");
-        throw new Error("Missing IMEI"); 
-      } catch (firstError) {
-        console.warn("First attempt failed or was incomplete, initiating Smart Retry...");
-        
-        // --- Smart Retry Attempt ---
-        // Modify the prompt to be more forceful and specific about the IMEI
-        const originalPrompt = req.body.contents[0].parts[0].text;
-        const retryPrompt = `Your previous response was incomplete or not valid JSON. Please try again. Look at the image carefully. Extract the 'Client name', 'Phone#', 'Price', 'Model', and especially the 'IMEI#'. The IMEI# is a long numeric string. Provide ONLY the valid JSON object as requested. Do not include any extra text or explanations. The original request was: "${originalPrompt}"`;
-        
-        const retryPayload = { ...req.body };
-        retryPayload.contents[0].parts[0].text = retryPrompt;
-
-        googleResponse = await fetch(GOOGLE_API_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(retryPayload)
-        });
-
-        if (!googleResponse.ok) {
-            const errorBody = await googleResponse.text();
-            console.error("Retry Error from Google API:", errorBody);
-            throw new Error(`Google API (retry) responded with status ${googleResponse.status}`);
-        }
-
-        data = await googleResponse.json();
-
-        if (data.candidates && data.candidates.length > 0) {
-            const retryTextResponse = data.candidates[0].content.parts[0].text;
-            const parsedJson = extractAndParseJson(retryTextResponse); // This will throw if it fails again
-            return res.json(parsedJson); // Success on second try!
-        }
-      }
     }
     
-    // If we reach here, both attempts failed or there were no candidates
-    throw new Error("AI did not provide a valid response after two attempts.");
+    // Return the final, potentially combined, JSON object
+    return res.json(parsedJson);
 
   } catch (error) {
     console.error('Proxy Server Final Error:', error.message);
@@ -104,5 +93,5 @@ app.post('/gemini-proxy', async (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`Proxy server with Smart Retry listening on port ${PORT}`);
+  console.log(`Proxy server with Targeted Extraction listening on port ${PORT}`);
 });
