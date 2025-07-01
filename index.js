@@ -53,14 +53,20 @@ app.post('/gemini-proxy', async (req, res) => {
       const textResponse = data.candidates[0].content.parts[0].text;
       try {
         const parsedJson = extractAndParseJson(textResponse);
-        return res.json(parsedJson); // Success on first try!
+        // Add a check to see if IMEI was captured
+        if (parsedJson.imei) {
+            return res.json(parsedJson); // Success on first try!
+        }
+        // If IMEI is missing, we'll fall through to the retry logic
+        console.warn("IMEI not found on first attempt. Initiating Smart Retry...");
+        throw new Error("Missing IMEI"); 
       } catch (firstError) {
-        console.warn("First attempt failed, initiating Smart Retry...");
+        console.warn("First attempt failed or was incomplete, initiating Smart Retry...");
         
         // --- Smart Retry Attempt ---
-        // Modify the prompt to be more forceful
+        // Modify the prompt to be more forceful and specific about the IMEI
         const originalPrompt = req.body.contents[0].parts[0].text;
-        const retryPrompt = `Your previous response was not valid JSON. Please try again. Look at the image and provide ONLY the valid JSON object as requested. Do not include any extra text, markdown, or explanations. The original request was: "${originalPrompt}"`;
+        const retryPrompt = `Your previous response was incomplete or not valid JSON. Please try again. Look at the image carefully. Extract the 'Client name', 'Phone#', 'Price', 'Model', and especially the 'IMEI#'. The IMEI# is a long numeric string. Provide ONLY the valid JSON object as requested. Do not include any extra text or explanations. The original request was: "${originalPrompt}"`;
         
         const retryPayload = { ...req.body };
         retryPayload.contents[0].parts[0].text = retryPrompt;
