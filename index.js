@@ -2,21 +2,31 @@
 
 const express = require('express');
 const cors = require('cors');
-const fetch = require('node-fetch'); // Make sure to install this: npm install node-fetch
+const fetch = require('node-fetch');
 
 const app = express();
 
-// Use CORS to allow your deployed website to call this server
-app.use(cors({
-  origin: '*' // For production, you should restrict this to your actual domain
-}));
+app.use(cors({ origin: '*' }));
+app.use(express.json({ limit: '10mb' }));
 
-app.use(express.json({limit: '10mb'})); // Allow larger payloads for images
+// Helper function to find and parse JSON from a string
+const extractAndParseJson = (text) => {
+  try {
+    const startIndex = text.indexOf('{');
+    const endIndex = text.lastIndexOf('}');
+    if (startIndex === -1 || endIndex === -1) {
+      throw new Error("No JSON object found in the string.");
+    }
+    const jsonString = text.substring(startIndex, endIndex + 1);
+    return JSON.parse(jsonString);
+  } catch (error) {
+    console.error("Failed during JSON extraction/parsing:", error);
+    throw new Error("Malformed JSON response from AI.");
+  }
+};
 
 app.post('/gemini-proxy', async (req, res) => {
-  // Get the secret API key from your Render environment variables
   const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-
   if (!GEMINI_API_KEY) {
     return res.status(500).json({ error: 'API key not configured on the server.' });
   }
@@ -24,61 +34,69 @@ app.post('/gemini-proxy', async (req, res) => {
   const GOOGLE_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
 
   try {
-    const googleResponse = await fetch(GOOGLE_API_URL, {
+    // --- First Attempt ---
+    let googleResponse = await fetch(GOOGLE_API_URL, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(req.body) // Forward the request body from your frontend
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
     });
 
     if (!googleResponse.ok) {
-      const errorBody = await googleResponse.text();
-      console.error("Error from Google API:", errorBody);
-      throw new Error(`Google API responded with status ${googleResponse.status}`);
+        const errorBody = await googleResponse.text();
+        console.error("Initial Error from Google API:", errorBody);
+        throw new Error(`Google API responded with status ${googleResponse.status}`);
     }
-
-    const data = await googleResponse.json();
+    
+    let data = await googleResponse.json();
 
     if (data.candidates && data.candidates.length > 0) {
-        let textResponse = data.candidates[0].content.parts[0].text;
+      const textResponse = data.candidates[0].content.parts[0].text;
+      try {
+        const parsedJson = extractAndParseJson(textResponse);
+        return res.json(parsedJson); // Success on first try!
+      } catch (firstError) {
+        console.warn("First attempt failed, initiating Smart Retry...");
         
-        // --- THIS IS THE FINAL, ROBUST FIX ---
-        // It finds the JSON block even if it's wrapped in markdown or other text.
-        try {
-            // Find the start and end of the JSON object
-            const startIndex = textResponse.indexOf('{');
-            const endIndex = textResponse.lastIndexOf('}');
-            
-            if (startIndex === -1 || endIndex === -1) {
-                throw new Error("Could not find a valid JSON object in the AI's response.");
-            }
+        // --- Smart Retry Attempt ---
+        // Modify the prompt to be more forceful
+        const originalPrompt = req.body.contents[0].parts[0].text;
+        const retryPrompt = `Your previous response was not valid JSON. Please try again. Look at the image and provide ONLY the valid JSON object as requested. Do not include any extra text, markdown, or explanations. The original request was: "${originalPrompt}"`;
+        
+        const retryPayload = { ...req.body };
+        retryPayload.contents[0].parts[0].text = retryPrompt;
 
-            // Extract only the JSON part of the string
-            const jsonString = textResponse.substring(startIndex, endIndex + 1);
+        googleResponse = await fetch(GOOGLE_API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(retryPayload)
+        });
 
-            const parsedJson = JSON.parse(jsonString);
-            res.json(parsedJson); // Send the clean JSON object back to the frontend
-
-        } catch (jsonError) {
-            console.error("JSON Parsing Error on Server:", jsonError);
-            console.error("Malformed string from AI:", textResponse);
-            res.status(500).json({ error: 'The AI returned a malformed response. Please try again.' });
+        if (!googleResponse.ok) {
+            const errorBody = await googleResponse.text();
+            console.error("Retry Error from Google API:", errorBody);
+            throw new Error(`Google API (retry) responded with status ${googleResponse.status}`);
         }
-        // --- END OF FIX ---
 
-    } else {
-        console.error("No candidates in AI response:", data);
-        res.status(500).json({ error: 'The AI did not provide a valid response.' });
+        data = await googleResponse.json();
+
+        if (data.candidates && data.candidates.length > 0) {
+            const retryTextResponse = data.candidates[0].content.parts[0].text;
+            const parsedJson = extractAndParseJson(retryTextResponse); // This will throw if it fails again
+            return res.json(parsedJson); // Success on second try!
+        }
+      }
     }
+    
+    // If we reach here, both attempts failed or there were no candidates
+    throw new Error("AI did not provide a valid response after two attempts.");
 
   } catch (error) {
-    console.error('Proxy Server Error:', error);
-    res.status(500).json({ error: 'An error occurred while contacting the Google AI service.' });
+    console.error('Proxy Server Final Error:', error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`Proxy server listening on port ${PORT}`);
+  console.log(`Proxy server with Smart Retry listening on port ${PORT}`);
 });
