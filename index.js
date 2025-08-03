@@ -6,7 +6,7 @@ const fetch = require('node-fetch');
 
 const app = express();
 
-app.use(cors({ origin: 'https://qr-barcode-imei.netlify.app' }));
+app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '10mb' }));
 
 // Helper function to find and parse JSON from a string
